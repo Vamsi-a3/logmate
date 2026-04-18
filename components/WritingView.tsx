@@ -1,9 +1,10 @@
 "use client";
 
-import { useState, useEffect, useRef, useCallback, useMemo } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { motion } from "motion/react";
 import { Mic, Send, Square, Save, FileText } from "lucide-react";
 import { format } from "date-fns";
+import { startSarvamVoiceCapture } from "@/lib/sarvam-voice-capture";
 
 type DateInfo = {
   type: "daily" | "weekly";
@@ -29,32 +30,15 @@ function uid() {
   return Math.random().toString(36).slice(2, 11);
 }
 
-function toWebSocketUrl(httpBase: string): string {
-  try {
-    const u = new URL(
-      httpBase.startsWith("http") ? httpBase : `http://${httpBase}`
-    );
-    const proto = u.protocol === "https:" ? "wss:" : "ws:";
-    return `${proto}//${u.host}/ws`;
-  } catch {
-    return "ws://127.0.0.1:8000/ws";
-  }
-}
-
 export function WritingView({ onSaveLog, dateInfo }: WritingViewProps) {
-  const bridgeBase =
-    process.env.NEXT_PUBLIC_SARVAM_BRIDGE_URL ?? "http://127.0.0.1:8000";
-
-  const wsUrl = useMemo(() => toWebSocketUrl(bridgeBase), [bridgeBase]);
-
   const [composer, setComposer] = useState("");
   const [messages, setMessages] = useState<ChatMsg[]>([]);
   const [isRecording, setIsRecording] = useState(false);
   const [chatLoading, setChatLoading] = useState(false);
-  const [bridgeError, setBridgeError] = useState<string | null>(null);
+  const [voiceError, setVoiceError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
-  const wsRef = useRef<WebSocket | null>(null);
+  const voiceSessionRef = useRef<{ stop: () => Promise<void> } | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -64,85 +48,53 @@ export function WritingView({ onSaveLog, dateInfo }: WritingViewProps) {
     });
   }, [messages, chatLoading]);
 
-  /** Stops the mic only. Keep the WebSocket open — Sarvam runs async and may send the transcript seconds after stop. */
+  /** Stops the mic and flushes the last chunk; Sarvam may still return transcript moments later. */
   const stopRecording = useCallback(async () => {
-    try {
-      await fetch(`${bridgeBase}/stop`, { method: "POST", mode: "cors" });
-    } catch {
-      /* ignore */
-    }
+    const session = voiceSessionRef.current;
+    voiceSessionRef.current = null;
     setIsRecording(false);
-  }, [bridgeBase]);
+    if (session) {
+      await session.stop();
+    }
+  }, []);
 
-  /** Full teardown: stop bridge and close socket (unmount). */
-  const disconnectBridge = useCallback(async () => {
-    try {
-      await fetch(`${bridgeBase}/stop`, { method: "POST", mode: "cors" });
-    } catch {
-      /* ignore */
-    }
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {
-        /* ignore */
-      }
-      wsRef.current = null;
-    }
+  /** Full teardown on unmount */
+  const disconnectVoice = useCallback(async () => {
+    const session = voiceSessionRef.current;
+    voiceSessionRef.current = null;
     setIsRecording(false);
-  }, [bridgeBase]);
+    if (session) {
+      await session.stop();
+    }
+  }, []);
 
   const startListening = useCallback(async () => {
-    setBridgeError(null);
+    if (voiceSessionRef.current) return;
+    setVoiceError(null);
     try {
-      const res = await fetch(`${bridgeBase}/start`, {
-        method: "POST",
-        mode: "cors",
+      const session = await startSarvamVoiceCapture({
+        onTranscript: (text) => {
+          setComposer((prev) => (prev.trim() ? `${prev} ${text}` : text));
+        },
+        onError: (msg) => setVoiceError(msg),
       });
-      if (!res.ok) {
-        throw new Error(`Start failed: ${res.status}`);
-      }
+      voiceSessionRef.current = session;
       setIsRecording(true);
     } catch (e) {
       console.error(e);
-      setBridgeError(
-        "Could not reach the Sarvam bridge. Run web_app.py (port 8000) and set NEXT_PUBLIC_SARVAM_BRIDGE_URL if needed."
+      setVoiceError(
+        e instanceof Error
+          ? e.message
+          : "Could not start voice capture. Check microphone permission and SARVAM_API_KEY on the server."
       );
-      return;
     }
-
-    if (wsRef.current) {
-      try {
-        wsRef.current.close();
-      } catch {
-        /* ignore */
-      }
-      wsRef.current = null;
-    }
-
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
-    ws.onmessage = (ev) => {
-      const text = String(ev.data ?? "").trim();
-      if (text) {
-        setComposer((prev) => (prev.trim() ? `${prev} ${text}` : text));
-      }
-    };
-    ws.onerror = () => {
-      setBridgeError("WebSocket error — check web_app.py is running on port 8000.");
-      void fetch(`${bridgeBase}/stop`, { method: "POST", mode: "cors" }).catch(
-        () => {}
-      );
-      setIsRecording(false);
-      wsRef.current = null;
-    };
-  }, [bridgeBase, wsUrl]);
+  }, []);
 
   useEffect(() => {
     return () => {
-      void disconnectBridge();
+      void disconnectVoice();
     };
-  }, [disconnectBridge]);
+  }, [disconnectVoice]);
 
   // Send to AI for polishing, then show draft to edit & save
   const sendToLlm = async () => {
@@ -270,9 +222,9 @@ export function WritingView({ onSaveLog, dateInfo }: WritingViewProps) {
           </div>
         )}
 
-        {bridgeError && (
+        {voiceError && (
           <p className="text-center text-[0.75rem] text-red-700 max-w-lg mx-auto">
-            {bridgeError}
+            {voiceError}
           </p>
         )}
 

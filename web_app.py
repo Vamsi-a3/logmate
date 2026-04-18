@@ -6,14 +6,23 @@ import threading
 import asyncio
 import numpy as np
 import requests
-import sounddevice as sd
+
+try:
+    import sounddevice as sd
+except Exception as _sd_exc:
+    sd = None  # type: ignore
+    _SD_IMPORT_ERR = str(_sd_exc)
+else:
+    _SD_IMPORT_ERR = None
+
 from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 
 
 
-API_KEY = os.environ.get("SARVAM_API_KEY", "sk_oulzmjrc_1nKMaMYQhGv1BudlWcxmVAva")
+# Deprecated: voice uses the browser + Next.js /api/transcribe. Kept only for local experiments.
+API_KEY = os.environ.get("SARVAM_API_KEY")
 
 URL = "https://api.sarvam.ai/speech-to-text"
 SAMPLE_RATE = 16000
@@ -57,6 +66,9 @@ def save_wav(audio, filename):
         wf.writeframes(audio.tobytes())
 
 def send_to_sarvam(filename):
+    if not API_KEY:
+        print("[!] SARVAM_API_KEY is not set; skipping Sarvam request.")
+        return
     headers = {"Authorization": f"Bearer {API_KEY}"}
     try:
         with open(filename, "rb") as f:
@@ -81,11 +93,18 @@ def send_to_sarvam(filename):
         print(f"[!] Network Error: {e}")
 
 def record_thread_loop():
+    if sd is None:
+        print(
+            f"[mic] sounddevice unavailable — mic capture disabled "
+            f"(typical on cloud servers). {_SD_IMPORT_ERR or ''}"
+        )
+        return
+
     global is_system_recording
     buffer = []
     silence_counter = 0
     is_recording = False
-    
+
     def callback(indata, frames, time_info, status):
         nonlocal buffer, silence_counter, is_recording
         if not is_system_recording:

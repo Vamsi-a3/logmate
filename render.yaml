@@ -1,0 +1,15 @@
+# Blueprint: Dashboard → Blueprints → New Blueprint Instance → connect repo.
+#
+# Set Root Directory to `logmate-next` (the folder that contains package.json).
+# Add SARVAM_API_KEY in the Render dashboard (Environment) for voice transcription.
+#
+services:
+  - type: web
+    name: logmate-next
+    runtime: node
+    rootDir: logmate-next
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: "20"
